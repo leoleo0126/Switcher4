@@ -1,0 +1,394 @@
+name: Build APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Create Android project
+        shell: bash
+        run: |
+          mkdir -p Switcher/app/src/main/java/com/example/switcher
+          mkdir -p Switcher/app/src/main/res/drawable
+          mkdir -p Switcher/app/src/main/res/values
+          mkdir -p Switcher/app/src/main/res/layout
+
+          cat > Switcher/settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+
+          rootProject.name = 'Switcher'
+          include ':app'
+          EOF
+
+          cat > Switcher/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.7.3' apply false
+              id 'org.jetbrains.kotlin.android' version '2.0.21' apply false
+          }
+
+          allprojects {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          EOF
+
+          cat > Switcher/gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          EOF
+
+          cat > Switcher/app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+              id 'org.jetbrains.kotlin.android'
+          }
+
+          android {
+              namespace 'com.example.switcher'
+              compileSdk 35
+
+              defaultConfig {
+                  applicationId 'com.example.switcher'
+                  minSdk 26
+                  targetSdk 35
+                  versionCode 5
+                  versionName '5.0'
+              }
+          }
+
+          dependencies {
+              implementation 'androidx.core:core-ktx:1.15.0'
+              implementation 'androidx.appcompat:appcompat:1.7.0'
+          }
+          EOF
+
+          cat > Switcher/app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+              <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
+              <application
+                  android:allowBackup="true"
+                  android:label="스위쳐"
+                  android:theme="@style/Theme.Switcher">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+
+                  </activity>
+
+                  <service
+                      android:name=".SwitcherService"
+                      android:exported="false"
+                      android:foregroundServiceType="specialUse">
+
+                      <property
+                          android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                          android:value="User-requested floating button for switching to the previous app" />
+
+                  </service>
+
+              </application>
+
+          </manifest>
+          EOF
+
+          cat > Switcher/app/src/main/java/com/example/switcher/MainActivity.kt <<'EOF'
+          package com.example.switcher
+
+          import android.app.Activity
+          import android.app.AppOpsManager
+          import android.content.Context
+          import android.content.Intent
+          import android.net.Uri
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.widget.Button
+          import android.widget.Toast
+
+          class MainActivity : Activity() {
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  setContentView(R.layout.activity_main)
+
+                  findViewById<Button>(R.id.startButton).setOnClickListener {
+                      if (!Settings.canDrawOverlays(this)) {
+                          Toast.makeText(
+                              this,
+                              "'다른 앱 위에 표시' 권한을 허용해 주세요.",
+                              Toast.LENGTH_LONG
+                          ).show()
+
+                          startActivity(
+                              Intent(
+                                  Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                  Uri.parse("package:$packageName")
+                              )
+                          )
+                          return@setOnClickListener
+                      }
+
+                      if (!hasUsageAccess()) {
+                          Toast.makeText(
+                              this,
+                              "'사용 기록 접근' 권한을 허용해 주세요.",
+                              Toast.LENGTH_LONG
+                          ).show()
+
+                          startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
+                          return@setOnClickListener
+                      }
+
+                      startForegroundService(
+                          Intent(this, SwitcherService::class.java)
+                      )
+
+                      Toast.makeText(
+                          this,
+                          "스위쳐를 시작했습니다.",
+                          Toast.LENGTH_SHORT
+                      ).show()
+                  }
+
+                  findViewById<Button>(R.id.stopButton).setOnClickListener {
+                      stopService(Intent(this, SwitcherService::class.java))
+
+                      Toast.makeText(
+                          this,
+                          "스위쳐를 중지했습니다.",
+                          Toast.LENGTH_SHORT
+                      ).show()
+                  }
+              }
+
+              private fun hasUsageAccess(): Boolean {
+                  val appOps =
+                      getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
+
+                  val mode = appOps.unsafeCheckOpNoThrow(
+                      AppOpsManager.OPSTR_GET_USAGE_STATS,
+                      android.os.Process.myUid(),
+                      packageName
+                  )
+
+                  return mode == AppOpsManager.MODE_ALLOWED
+              }
+          }
+          EOF
+
+          cat > Switcher/app/src/main/java/com/example/switcher/SwitcherService.kt <<'EOF'
+          package com.example.switcher
+
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.Service
+          import android.app.usage.UsageEvents
+          import android.app.usage.UsageStatsManager
+          import android.content.Context
+          import android.content.Intent
+          import android.content.pm.ServiceInfo
+          import android.graphics.Color
+          import android.graphics.PixelFormat
+          import android.graphics.drawable.GradientDrawable
+          import android.os.Build
+          import android.os.IBinder
+          import android.provider.Settings
+          import android.view.Gravity
+          import android.view.MotionEvent
+          import android.view.View
+          import android.view.WindowManager
+          import android.widget.TextView
+          import androidx.core.app.NotificationCompat
+          import kotlin.math.abs
+
+          class SwitcherService : Service() {
+
+              private lateinit var windowManager: WindowManager
+              private var button: View? = null
+
+              override fun onCreate() {
+                  super.onCreate()
+
+                  createNotificationChannel()
+                  startAsForeground()
+                  showFloatingButton()
+              }
+
+              private fun startAsForeground() {
+                  val notification =
+                      NotificationCompat.Builder(this, CHANNEL_ID)
+                          .setSmallIcon(android.R.drawable.ic_menu_revert)
+                          .setContentTitle("스위쳐 실행 중")
+                          .setContentText("플로팅 버튼으로 직전 앱으로 전환")
+                          .setOngoing(true)
+                          .setPriority(NotificationCompat.PRIORITY_LOW)
+                          .build()
+
+                  if (Build.VERSION.SDK_INT >= 34) {
+                      startForeground(
+                          1001,
+                          notification,
+                          ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+                      )
+                  } else {
+                      startForeground(1001, notification)
+                  }
+              }
+
+              private fun showFloatingButton() {
+                  if (!Settings.canDrawOverlays(this)) {
+                      stopSelf()
+                      return
+                  }
+
+                  windowManager =
+                      getSystemService(WINDOW_SERVICE) as WindowManager
+
+                  val density = resources.displayMetrics.density
+                  val size = (52 * density).toInt()
+
+                  val view = TextView(this).apply {
+                      text = "↔"
+                      textSize = 22f
+                      setTextColor(Color.WHITE)
+                      gravity = Gravity.CENTER
+
+                      background = GradientDrawable().apply {
+                          shape = GradientDrawable.OVAL
+                          setColor(Color.rgb(108, 99, 255))
+                          setStroke(
+                              2,
+                              Color.argb(90, 255, 255, 255)
+                          )
+                      }
+
+                      elevation = 10f
+                  }
+
+                  val type =
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                          WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                      } else {
+                          @Suppress("DEPRECATION")
+                          WindowManager.LayoutParams.TYPE_PHONE
+                      }
+
+                  val lp = WindowManager.LayoutParams(
+                      size,
+                      size,
+                      type,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                          WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                      PixelFormat.TRANSLUCENT
+                  ).apply {
+                      gravity = Gravity.TOP or Gravity.START
+                      x = (resources.displayMetrics.widthPixels - size) / 2
+                      y = resources.displayMetrics.heightPixels / 2
+                  }
+
+                  var downX = 0f
+                  var downY = 0f
+                  var startX = 0
+                  var startY = 0
+                  var moved = false
+
+                  view.setOnTouchListener { _, event ->
+                      when (event.actionMasked) {
+
+                          MotionEvent.ACTION_DOWN -> {
+                              downX = event.rawX
+                              downY = event.rawY
+                              startX = lp.x
+                              startY = lp.y
+                              moved = false
+                              true
+                          }
+
+                          MotionEvent.ACTION_MOVE -> {
+                              val dx = event.rawX - downX
+                              val dy = event.rawY - downY
+
+                              if (abs(dx) > 8 || abs(dy) > 8) {
+                                  moved = true
+                              }
+
+                              lp.x = startX + dx.toInt()
+                              lp.y = startY + dy.toInt()
+
+                              windowManager.updateViewLayout(
+                                  view,
+                                  lp
+                              )
+
+                              true
+                          }
+
+                          MotionEvent.ACTION_UP -> {
+                              if (!moved) {
+                                  switchToPreviousApp()
+                              }
+
+                              true
+                          }
+
+                          else -> false
+                      }
+                  }
+
+                  windowManager.addView(view, lp)
+                  button = view
+              }
+
+              private fun switchToPreviousApp() {
+                  val usage =
+                      getSystemService(
+                          Context.USAGE_STATS_SERVICE
+                      ) as UsageStatsManager
+
+                  val end = System.currentTimeMillis()
+                  val begin = end - 15 * 60 * 1000L
+
+                  val events = usage.queryEvents(begin, end)
+                  val event = UsageEvents.Event()
+
+                  val ordered = LinkedHashSet<String>()
+
+                  while (events.hasNextEvent()) {
+                      events.getNextEvent(event)
+
+                      if (
+                          event.eventType ==
